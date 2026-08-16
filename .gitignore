@@ -1,0 +1,16 @@
+.env
+config.env
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.venv/
+*.txt
+!requirements*.txt
+*.mp3
+*.wav
+*.m4a
+.pytest_cache/
+.ruff_cache/
+kurs-*.md
