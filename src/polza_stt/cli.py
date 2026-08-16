@@ -39,7 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="длина куска в секундах (по умолчанию 300)")
     ap.add_argument("--jobs", type=int, default=0,
                     help=f"ограничение одновременных запросов (0 = авто, не более {AUTO_JOBS})")
-    ap.add_argument("--language", default="ru", help="ISO-639-1 или auto (по умолчанию ru)")
+    ap.add_argument("--language", default="auto",
+                    help="ISO-639-1 (ru, en, …) или auto — определить самому (по умолчанию)")
     ap.add_argument("--model", help="ID модели (без него — выбор в UI)")
     ap.add_argument("--config", "--env", dest="config",
                     help="путь к конфигу (по умолчанию единый пользовательский)")

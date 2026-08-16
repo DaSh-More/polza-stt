@@ -245,3 +245,26 @@ async def test_retry_sends_audio_not_error_text(tmp_path, monkeypatch):
 
 
 import asyncio  # noqa: E402  (нужен тестам выше)
+
+
+@pytest.mark.asyncio
+async def test_auto_language_omits_field(tmp_path):
+    """language=auto — поле не отправляем, пусть API определяет сам."""
+    chunk = tmp_path / "chunk_001.mp3"
+    chunk.write_bytes(b"audio")
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"text": "ок"})
+
+    env = {"base_url": "https://x/v1", "token": "t", "model": "m"}
+    async with _client(handler) as c:
+        await transcribe_chunk(c, chunk, env, "auto")
+    assert "language" not in seen
+    async with _client(handler) as c:
+        await transcribe_chunk(c, chunk, env, "ru")
+    assert seen["language"] == "ru"
+
+
+import json  # noqa: E402
