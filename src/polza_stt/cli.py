@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
-from .api import run_all
+from .api import AUTO_JOBS, run_all
 from .audio import FFmpegMissing, probe_duration, require_ffmpeg, split_audio
 from .config import (
     ask_config,
@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--chunk", type=int, default=300,
                     help="длина куска в секундах (по умолчанию 300)")
     ap.add_argument("--jobs", type=int, default=0,
-                    help="ограничение одновременных запросов (0 = все куски сразу)")
+                    help=f"ограничение одновременных запросов (0 = авто, не более {AUTO_JOBS})")
     ap.add_argument("--language", default="ru", help="ISO-639-1 или auto (по умолчанию ru)")
     ap.add_argument("--model", help="ID модели (без него — выбор в UI)")
     ap.add_argument("--config", "--env", dest="config",
@@ -108,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     info.add_row("примерно стоимость", f"[bold magenta]{rub(estimate)}[/bold magenta]")
     info.add_row("кусок", f"{args.chunk} c")
     info.add_row("параллельно",
-                 "все сразу (async)" if args.jobs <= 0 else f"не более {args.jobs} (async)")
+                 f"все сразу, не более {AUTO_JOBS} (async)" if args.jobs <= 0
+                 else f"не более {args.jobs} (async)")
     info.add_row("результат", str(out_path))
     console.print(Panel(info, title="Транскрибация", border_style="green"))
 

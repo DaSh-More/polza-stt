@@ -181,3 +181,67 @@ async def test_empty_text_is_error(tmp_path, monkeypatch):
 
 async def _noop():
     return None
+
+
+class _Dash:
+    """Заглушка дашборда: молча принимает статусы."""
+
+    def set(self, *a, **kw):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_auto_concurrency_cap(tmp_path, monkeypatch):
+    """jobs=0 не должен пускать в полёт больше AUTO_JOBS запросов сразу."""
+    import polza_stt.api as api
+
+    monkeypatch.setattr(api, "AUTO_JOBS", 4)
+    chunks = []
+    for i in range(1, 13):
+        p = tmp_path / f"chunk_{i:03d}.mp3"
+        p.write_bytes(b"audio")
+        chunks.append(p)
+
+    state = {"now": 0, "max": 0}
+
+    async def handler(request):
+        state["now"] += 1
+        state["max"] = max(state["max"], state["now"])
+        await asyncio.sleep(0.01)
+        state["now"] -= 1
+        return httpx.Response(200, json={"text": "ок"})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient  # ссылка до подмены, иначе рекурсия
+    monkeypatch.setattr(api.httpx, "AsyncClient", lambda **kw: real_client(transport=transport))
+    texts, failed, _ = await api.run_all(
+        chunks, {"base_url": "https://x/v1", "token": "t", "model": "m"}, "ru", 0, _Dash()
+    )
+    assert not failed and texts == ["ок"] * 12
+    assert state["max"] <= 4, f"в полёте было {state['max']} запросов при потолке 4"
+
+
+@pytest.mark.asyncio
+async def test_retry_sends_audio_not_error_text(tmp_path, monkeypatch):
+    """Повтор должен слать то же тело запроса, а не текст прошлой ошибки."""
+    monkeypatch.setattr("polza_stt.api.asyncio.sleep", lambda *_: _noop())
+    chunk = tmp_path / "chunk_001.mp3"
+    chunk.write_bytes(b"audio")
+    bodies = []
+
+    def handler(request):
+        bodies.append(request.content)
+        if len(bodies) == 1:
+            return httpx.Response(500, text="боль на сервере")
+        return httpx.Response(200, json={"text": "ок"})
+
+    async with _client(handler) as c:
+        text, _ = await transcribe_chunk(
+            c, chunk, {"base_url": "https://x/v1", "token": "t", "model": "m"}, "ru"
+        )
+    assert text == "ок"
+    assert bodies[0] == bodies[1], "второй запрос ушёл с другим телом"
+    assert b"base64" in bodies[1]
+
+
+import asyncio  # noqa: E402  (нужен тестам выше)

@@ -2,11 +2,13 @@
 
 import asyncio
 import base64
+import json
 from pathlib import Path
 
 import httpx
 
 
+AUTO_JOBS = 16  # потолок одновременных запросов, когда --jobs не задан
 PENDING = {"processing", "queued", "pending", "in_progress", "running", "starting"}
 POLL_INTERVAL = 3.0
 POLL_TIMEOUT = 1800.0
@@ -54,15 +56,21 @@ async def transcribe_chunk(
     """Возвращает (текст, точная стоимость в рублях или None, если API её не отдал)."""
     url = env["base_url"].rstrip("/") + "/audio/transcriptions"
 
-    # чтение и base64 — блокирующие, уводим в поток, чтобы не тормозить loop
-    payload = {
-        "model": env["model"],
-        "file": "data:audio/mp3;base64,"
-        + await asyncio.to_thread(lambda: base64.b64encode(chunk.read_bytes()).decode()),
-        "response_format": "json",
-    }
-    if language and language != "auto":
-        payload["language"] = language
+    # Чтение, base64 и сериализация — блокирующие, уводим в поток. Тело собираем
+    # сами и держим ровно одну копию: на длинном файле каждая лишняя копия куска
+    # это +3 МБ на каждый запрос в полёте.
+    def build_body() -> bytes:
+        payload = {
+            "model": env["model"],
+            "file": "data:audio/mp3;base64,"
+            + base64.b64encode(chunk.read_bytes()).decode(),
+            "response_format": "json",
+        }
+        if language and language != "auto":
+            payload["language"] = language
+        return json.dumps(payload).encode()
+
+    body = await asyncio.to_thread(build_body)
 
     last_err = None
     for attempt in range(attempts):
@@ -73,7 +81,7 @@ async def transcribe_chunk(
                     "Authorization": f"Bearer {env['token']}",
                     "Content-Type": "application/json",
                 },
-                json=payload,
+                content=body,
             )
             r.raise_for_status()
             # обычно JSON, но при response_format=text приходит plain text
@@ -94,9 +102,9 @@ async def transcribe_chunk(
             return text, cost
         except Exception as e:  # сеть/5xx — повторяем
             last_err = e
-            if on_retry:
-                body = getattr(getattr(e, "response", None), "text", "") or ""
-                on_retry(attempt + 1, f"{e} {body[:120]}".strip())
+            if on_retry:  # именно detail, а не body — body это тело запроса
+                detail = getattr(getattr(e, "response", None), "text", "") or ""
+                on_retry(attempt + 1, f"{e} {detail[:120]}".strip())
             if attempt < attempts - 1:
                 await asyncio.sleep(2 * (attempt + 1))
     raise RuntimeError(
@@ -117,7 +125,10 @@ async def run_all(
     texts: list[str] = [""] * len(chunks)
     costs: list[float | None] = [None] * len(chunks)
     failed: list[str] = []
-    sem = asyncio.Semaphore(jobs) if jobs > 0 else None
+    # jobs <= 0 — «все сразу», но с потолком: каждый запрос в полёте держит
+    # ~3 МБ base64, и на десятичасовом файле 120 кусков съели бы под гигабайт
+    limit = jobs if jobs > 0 else min(len(chunks), AUTO_JOBS)
+    sem = asyncio.Semaphore(limit) if limit < len(chunks) else None
 
     async def one(chunk: Path):
         return await transcribe_chunk(
@@ -127,12 +138,13 @@ async def run_all(
         )
 
     async def work(idx: int, chunk: Path):
-        dash.set(chunk.name, "work")
         try:
             if sem:
-                async with sem:
+                async with sem:  # пока ждём очереди, кусок числится «ожидает»
+                    dash.set(chunk.name, "work")
                     text, cost = await one(chunk)
             else:
+                dash.set(chunk.name, "work")
                 text, cost = await one(chunk)
         except Exception as e:
             dash.set(chunk.name, "fail", str(e)[:120], advance=True)
@@ -142,7 +154,7 @@ async def run_all(
         note = f"{len(text.split())} слов" + (f" · {rub(cost)}" if cost is not None else "")
         dash.set(chunk.name, "done", note, advance=True)
 
-    limits = httpx.Limits(max_connections=None, max_keepalive_connections=None)
+    limits = httpx.Limits(max_connections=limit, max_keepalive_connections=limit)
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(600.0, connect=30.0), limits=limits
     ) as client:
